@@ -17,16 +17,21 @@ One row from the **train** split ([`textvqa` on Hugging Face](https://huggingfac
 
 ## Results
 
-Evaluation uses a **non-overlapping** slice of the TextVQA validation split (no overlap with the subset used for Trainer validation during training). Metrics compare string predictions to reference answers (exact / relaxed / VQA-style / substring).
+Evaluation uses a **non-overlapping** slice of the TextVQA validation split (no overlap with the subset used for Trainer validation during training). `evaluate.py` scores each model on the same questions; percentages are **means over questions** (see metrics below).
 
 | Metric | Baseline | Fine-tuned | Δ |
 |--------|----------|------------|---|
-| Exact match | 23.80% | 29.40% | +5.60 pp |
-| Relaxed match | 55.60% | 56.00% | +0.40 pp |
-| VQA accuracy | 73.40% | 73.67% | +0.27 pp |
-| Substring hit | 79.80% | 79.80% | 0.00 pp |
+| Exact match | 23.80% | 37.40% | +13.60 pp |
+| Relaxed match | 55.60% | 55.60% | 0.00 pp |
+| VQA accuracy | 73.40% | 73.40% | 0.00 pp |
 
-*Example run: short-answer instruction suffix, 5k training samples; retrain after changing data size or hyperparameters and refresh this table if you report numbers publicly.*
+### Metrics (how they are computed)
+
+- **Exact match** — The model’s answer (first line of the generation) must match the **first** human reference string **exactly** after stripping surrounding whitespace. Strictest metric; sensitive to capitalization and punctuation.
+
+- **Relaxed match** — Same pairing as exact match (prediction vs **first** reference), but both strings are **normalized**: lowercased, punctuation removed, and whitespace collapsed. Ignores surface form differences that humans usually ignore.
+
+- **VQA accuracy** — Standard VQA scoring: TextVQA provides up to **10** reference answers per question. After the same normalization, count how many references equal the prediction; the score for that question is **min(hits / 3, 1)**. This rewards agreement with multiple annotators and is **not** tied to only the first reference. Reported as the **average** of these per-question scores, shown as a percentage.
 
 ---
 
