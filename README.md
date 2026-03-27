@@ -2,6 +2,17 @@
 
 This repo adapts **Qwen2-VL-2B-Instruct** to **TextVQA**—reading text in images and answering short questions about it. We fine-tune with **QLoRA** (4-bit base model + small LoRA adapters on the language model; vision stays frozen), then compare the **base checkpoint** and the **adapter** on the same held-out questions so gains are apples-to-apples.
 
+### Example data point (TextVQA)
+
+One row from the **train** split ([`textvqa` on Hugging Face](https://huggingface.co/datasets/textvqa)): a photo plus a question whose answer is grounded in on-image text.
+
+![TextVQA example: phone with visible branding](assets/textvqa_example.png)
+
+| | |
+|--|--|
+| **Question** | what is the brand of phone? |
+| **Reference answers** (annotators; subset) | nokia, nokia, nokia, … |
+
 ---
 
 ## Results
