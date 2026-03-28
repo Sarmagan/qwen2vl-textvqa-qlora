@@ -27,8 +27,8 @@ from qwen_vl_utils import process_vision_info
 parser = argparse.ArgumentParser()
 parser.add_argument("--adapter_path", default="./qwen2vl_textvqa_qlora",
                     help="Path to the saved LoRA adapter directory")
-parser.add_argument("--num_samples", type=int, default=500,
-                    help="Number of test samples to evaluate")
+parser.add_argument("--num_samples", type=int, default=None,
+                    help="Number of holdout samples to evaluate (default: all remaining non-overlapping validation rows)")
 parser.add_argument("--batch_size", type=int, default=4,
                     help="Inference batch size (per model)")
 parser.add_argument("--seed", type=int, default=42)
@@ -265,7 +265,12 @@ def main():
         else val_used_in_training
     )
     val_shuffled = val_full.shuffle(seed=shuffle_seed)
-    n_take = min(args.num_samples, max(0, n_val - holdout_start))
+    remaining_holdout = max(0, n_val - holdout_start)
+    n_take = (
+        remaining_holdout
+        if args.num_samples is None
+        else min(args.num_samples, remaining_holdout)
+    )
     if n_take == 0:
         print(
             f"  ERROR: No holdout rows (validation len={n_val}, holdout_start={holdout_start}). "

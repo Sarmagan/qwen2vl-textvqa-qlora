@@ -5,10 +5,12 @@ Run (single GPU):   python train.py
 Run (2x GPU DDP):   torchrun --nproc_per_node=2 train.py
 """
 
+print("[0/5] train.py starting (loading Python deps …)", flush=True)
+
 # ── 1. Imports ────────────────────────────────────────────────────────────────
-import os, json, random
+import os, json, random, string
 import importlib.metadata
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import List, Optional
 
 import torch
@@ -21,10 +23,13 @@ from transformers import (
     BitsAndBytesConfig,
     TrainingArguments,
     Trainer,
+    TrainerCallback,
 )
 from peft import LoraConfig, get_peft_model, TaskType, prepare_model_for_kbit_training
 from datasets import load_dataset
 from qwen_vl_utils import process_vision_info
+
+print("[0/5] Imports ready — entering main …", flush=True)
 
 
 def _patch_accelerate_dispatch_for_bnb_4bit():
@@ -103,8 +108,13 @@ class Cfg:
     model_id: str        = "Qwen/Qwen2-VL-2B-Instruct"
     output_dir: str      = "./qwen2vl_textvqa_qlora"
     dataset_name: str    = "textvqa"          # HF dataset id
-    train_samples: int   = 20000              # subset of TextVQA train (~34k)
+    train_samples: Optional[int] = None       # None = use full TextVQA train split
     val_samples: int     = 500
+    max_answers_per_question: Optional[int] = None  # None = use all unique normalized refs in pool
+    # One row per question; train gold from pool: "random" or "cycle" per epoch
+    answer_sampling: str = "random"  # "random" | "cycle"
+    # Validation must stay deterministic so eval_loss and load_best_model_at_end are stable (never "random")
+    val_answer_sampling: str = "first"  # "first" | "cycle"
     # LoRA
     lora_r: int          = 16
     lora_alpha: int      = 32
@@ -126,25 +136,82 @@ cfg = Cfg()
 # Nudge the model toward TextVQA-style short answers (not long captions).
 TEXTVQA_USER_SUFFIX = "\nAnswer with a short phrase only (a few words)."
 
+
+def normalize_answer_text(s: str) -> str:
+    """Match eval-time normalization so multi-answer supervision dedupes sensibly."""
+    s = s.lower().strip()
+    s = s.translate(str.maketrans("", "", string.punctuation))
+    return " ".join(s.split())
+
 # ── 3. Dataset ────────────────────────────────────────────────────────────────
 class TextVQADataset(Dataset):
     """
     Wraps the HF TextVQA split into Qwen2-VL chat format.
-    Each item: one image + one question → one answer (first answer string).
+    One row per question. The gold string is chosen from the unique reference pool:
+    ``random``, ``cycle`` (epoch + index), or ``first`` (always ``pool[0]``, stable for val).
     """
-    def __init__(self, hf_split, processor):
-        self.data      = hf_split
+    def __init__(
+        self,
+        hf_split,
+        processor,
+        max_answers_per_question: Optional[int] = None,
+        answer_sampling: str = "random",
+    ):
+        self.data = hf_split
         self.processor = processor
+        self.answer_sampling = answer_sampling
+        self._epoch = 0
+        self._answer_pools: List[List[str]] = []
+
+        # Build pools from the answers column only (no image decode).
+        for raw_answers in self.data["answers"]:
+            raw_answers = raw_answers if isinstance(raw_answers, list) else [raw_answers]
+            unique_answers = []
+            seen = set()
+
+            for answer in raw_answers:
+                answer = str(answer).strip()
+                key = normalize_answer_text(answer)
+                if not key or key in seen:
+                    continue
+                seen.add(key)
+                unique_answers.append(answer)
+                if (
+                    max_answers_per_question is not None
+                    and len(unique_answers) >= max_answers_per_question
+                ):
+                    break
+
+            if not unique_answers:
+                fallback = str(raw_answers[0]).strip() if raw_answers else ""
+                unique_answers = [fallback]
+
+            self._answer_pools.append(unique_answers)
+
+    def set_epoch(self, epoch: int) -> None:
+        """Used with ``answer_sampling="cycle"`` so the pick rotates per epoch."""
+        self._epoch = int(epoch)
+
+    def _pick_answer(self, idx: int) -> str:
+        pool = self._answer_pools[idx]
+        if not pool:
+            return ""
+        if self.answer_sampling == "first":
+            return pool[0]
+        if self.answer_sampling == "cycle":
+            return pool[(idx + self._epoch) % len(pool)]
+        if self.answer_sampling == "random":
+            return random.choice(pool)
+        raise ValueError(f"Unknown answer_sampling: {self.answer_sampling!r}")
 
     def __len__(self):
         return len(self.data)
 
     def __getitem__(self, idx):
-        item  = self.data[idx]
+        item = self.data[idx]
         image = item["image"]                    # PIL Image
         question = item["question"]
-        # TextVQA provides a list of answers; use the first one
-        answer = item["answers"][0] if isinstance(item["answers"], list) else item["answers"]
+        answer = self._pick_answer(idx)
 
         # Build Qwen2-VL chat message
         messages = [
@@ -228,10 +295,28 @@ def collate_fn(batch, processor):
     return inputs
 
 
+class SetEpochCallback(TrainerCallback):
+    """Keeps ``TextVQADataset._epoch`` in sync when ``answer_sampling`` is ``cycle``."""
+
+    def __init__(self, *datasets):
+        self.datasets = [d for d in datasets if d is not None]
+
+    def on_epoch_begin(self, args, state, control, **kwargs):
+        ep = int(state.epoch) if state.epoch is not None else 0
+        for ds in self.datasets:
+            if hasattr(ds, "set_epoch"):
+                ds.set_epoch(ep)
+
+
 # ── 4. Main ───────────────────────────────────────────────────────────────────
 def main():
     random.seed(cfg.seed)
     torch.manual_seed(cfg.seed)
+
+    if cfg.answer_sampling not in ("random", "cycle"):
+        raise ValueError('cfg.answer_sampling must be "random" or "cycle"')
+    if cfg.val_answer_sampling not in ("first", "cycle"):
+        raise ValueError('cfg.val_answer_sampling must be "first" or "cycle"')
 
     _patch_trainer_no_dataparallel_for_4bit_vlm()
 
@@ -284,6 +369,7 @@ def main():
         target_modules=[
             "q_proj", "k_proj", "v_proj", "o_proj",
             "gate_proj", "up_proj", "down_proj",
+            "merger.mlp.0", "merger.mlp.2",
         ],
     )
     model = get_peft_model(model, lora_cfg)
@@ -298,14 +384,32 @@ def main():
     raw = load_dataset("textvqa", trust_remote_code=True)
 
     # Deterministic shuffle + subset
-    train_raw = raw["train"].shuffle(seed=cfg.seed).select(range(cfg.train_samples))
+    train_full = raw["train"].shuffle(seed=cfg.seed)
+    train_raw = (
+        train_full
+        if cfg.train_samples is None
+        else train_full.select(range(min(cfg.train_samples, len(train_full))))
+    )
     val_raw   = raw["validation"].shuffle(seed=cfg.seed).select(range(cfg.val_samples))
 
-    train_ds = TextVQADataset(train_raw, processor)
-    val_ds   = TextVQADataset(val_raw,   processor)
+    train_ds = TextVQADataset(
+        train_raw,
+        processor,
+        max_answers_per_question=cfg.max_answers_per_question,
+        answer_sampling=cfg.answer_sampling,
+    )
+    val_ds = TextVQADataset(
+        val_raw,
+        processor,
+        max_answers_per_question=cfg.max_answers_per_question,
+        answer_sampling=cfg.val_answer_sampling,
+    )
 
     if is_main:
-        print(f"   Train: {len(train_ds):,} samples  |  Val: {len(val_ds):,} samples")
+        print(
+            f"   Train: {len(train_ds):,} questions (gold: {cfg.answer_sampling})"
+            f"  |  Val: {len(val_ds):,} questions (gold: {cfg.val_answer_sampling})"
+        )
 
     # ── 4d. Training args ─────────────────────────────────────────────────────
     if is_main:
@@ -346,6 +450,7 @@ def main():
         train_dataset=train_ds,
         eval_dataset=val_ds,
         data_collator=lambda b: collate_fn(b, processor),
+        callbacks=[SetEpochCallback(train_ds, val_ds)],
     )
 
     # ── 4f. Train ─────────────────────────────────────────────────────────────
@@ -367,6 +472,9 @@ def main():
             "dataset": cfg.dataset_name,
             "train_samples": cfg.train_samples,
             "val_samples": cfg.val_samples,
+            "max_answers_per_question": cfg.max_answers_per_question,
+            "answer_sampling": cfg.answer_sampling,
+            "val_answer_sampling": cfg.val_answer_sampling,
             # Same shuffle as evaluate.py: rows [0, val_samples) = Trainer eval;
             # rows [val_samples, …) are reserved for holdout evaluation (no overlap).
             "seed": cfg.seed,

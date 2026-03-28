@@ -21,7 +21,7 @@ Evaluation uses the full **non-overlapping** TextVQA validation holdout (no over
 
 | Metric | Baseline | Fine-tuned | Δ |
 |--------|----------|------------|---|
-| VQA accuracy | 75.19% | 76.32% | +1.13 pp |
+| VQA accuracy | 75.19% | 78.10% | +2.91 pp |
 
 ### Metrics (how they are computed)
 
@@ -53,7 +53,7 @@ python train.py
 torchrun --nproc_per_node=2 train.py
 ```
 
-Training pulls TextVQA from the Hub, formats chats with image + question, and optimizes only the assistant answer tokens. By default it uses the full TextVQA train split, and each question is expanded across its unique reference answers so fine-tuning is not tied to just the first annotator string. Checkpoints, the LoRA adapter, processor, and `run_meta.json` land under `./qwen2vl_textvqa_qlora` by default. Key settings (model id, **`train_samples` / `val_samples`**, `max_answers_per_question`, LoRA rank, epochs, LR, batching) live in the `Cfg` dataclass in `train.py`.
+Training pulls TextVQA from the Hub, formats chats with image + question, and optimizes only the assistant answer tokens. By default it uses the full TextVQA train split. Each step uses **one row per question**; the gold string is sampled from the unique reference pool on the train split (`answer_sampling`: `random` per step, or `cycle` across epochs). Validation uses a **deterministic** target (`val_answer_sampling`: `first` reference in the pool, or `cycle`) so `eval_loss` and `load_best_model_at_end` are not noisy. Checkpoints, the LoRA adapter, processor, and `run_meta.json` land under `./qwen2vl_textvqa_qlora` by default. Key settings (model id, **`train_samples` / `val_samples`**, `max_answers_per_question`, `answer_sampling`, `val_answer_sampling`, LoRA rank, epochs, LR, batching) live in the `Cfg` dataclass in `train.py`.
 
 ---
 
