@@ -116,8 +116,8 @@ class Cfg:
     # Validation must stay deterministic so eval_loss and load_best_model_at_end are stable (never "random")
     val_answer_sampling: str = "first"  # "first" | "cycle"
     # LoRA
-    lora_r: int          = 16
-    lora_alpha: int      = 32
+    lora_r: int          = 32 # 16
+    lora_alpha: int      = 64 # 32
     lora_dropout: float  = 0.05
     # Training
     epochs: int          = 3

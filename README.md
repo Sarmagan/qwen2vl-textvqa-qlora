@@ -21,7 +21,9 @@ Evaluation uses the full **non-overlapping** TextVQA validation holdout (no over
 
 | Metric | Baseline | Fine-tuned | Δ |
 |--------|----------|------------|---|
-| VQA accuracy | 75.19% | 78.10% | +2.91 pp |
+| VQA accuracy | 75.19% | 78.21% | +3.02 pp |
+
+Fine-tuned row: **QLoRA** with **rank = 32**, **alpha = 64** (same eval protocol as above).
 
 ### Metrics (how they are computed)
 
